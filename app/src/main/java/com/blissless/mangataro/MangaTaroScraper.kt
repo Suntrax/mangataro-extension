@@ -81,12 +81,18 @@ object MangaTaroScraper {
             if (chapters.length() == 0) break
         }
 
-        // API returns DESC (newest first). Reverse to ASC (oldest first) for reading order.
-        allChapters.reverse()
+        // Deduplicate by chapter number — MangaTaro has multiple scanlation
+        // groups uploading the same chapter, so we'd otherwise show "Chapter 1"
+        // three times. Must happen BEFORE reverse() while the list is still in
+        // DESC (newest-first) order, so the tiebreak picks the newest upload.
+        val deduped = deduplicateChapters(allChapters)
 
-        // 3. Build the chapter list response
+        // API returns DESC (newest first). Reverse to ASC (oldest first) for reading order.
+        val ordered = deduped.asReversed()
+
+        // Build the chapter list response
         val chapterList = mutableListOf<Map<String, Any?>>()
-        for ((index, ch) in allChapters.withIndex()) {
+        for ((index, ch) in ordered.withIndex()) {
             chapterList.add(mapOf(
                 "number" to normalizeChapterNumber(ch.optString("chapter", "")),
                 "title" to ch.optString("title", ""),
@@ -97,7 +103,7 @@ object MangaTaroScraper {
         }
 
         return mapOf(
-            "totalChapters" to allChapters.size,
+            "totalChapters" to ordered.size,
             "mangaId" to mangaId,
             "chapters" to chapterList
         )
@@ -146,10 +152,14 @@ object MangaTaroScraper {
             if (chapters.length() == 0) break
         }
 
-        val totalChapters = allChapters.size
+        // Deduplicate by chapter number (same as listChapters) so the chapter
+        // count and findChapter() operate on the same deduplicated set the
+        // user sees in the chapter list.
+        val deduped = deduplicateChapters(allChapters)
+        val totalChapters = deduped.size
 
         // 3. Find the requested chapter
-        val match = findChapter(allChapters, chapter.trim())
+        val match = findChapter(deduped, chapter.trim())
         if (match == null) {
             return mapOf(
                 "totalChapters" to totalChapters,
@@ -257,6 +267,49 @@ object MangaTaroScraper {
         val input = "$ts$secret"
         val md5 = MessageDigest.getInstance("MD5").digest(input.toByteArray())
         return md5.joinToString("") { "%02x".format(it) }.substring(0, 16)
+    }
+
+    // ---------- Deduplication ----------
+
+    /**
+     * Deduplicate chapters by their normalized number.
+     *
+     * MangaTaro allows multiple scanlation groups to upload the same chapter,
+     * so the API returns several entries with the same `chapter` number but
+     * different `id`s (one per group). Without deduplication, the chapter
+     * list shows "Chapter 1" three times — confusing for the user and it
+     * breaks the chapter-count display.
+     *
+     * Selection policy when multiple entries share the same number:
+     *   1. Prefer entries with a non-empty title (most informative).
+     *   2. Among title-bearing entries, prefer the longest title (more detail).
+     *   3. If no entries have a title, keep the FIRST one encountered (the
+     *      API returns newest-first in DESC order, so this is the most
+     *      recently uploaded version — usually the best scanlation).
+     *
+     * IMPORTANT: call this BEFORE reverse() — the "first encountered" tiebreak
+     * relies on the API's DESC ordering.
+     */
+    private fun deduplicateChapters(chapters: List<JSONObject>): List<JSONObject> {
+        val byNumber = LinkedHashMap<String, JSONObject>()
+        for (ch in chapters) {
+            val number = normalizeChapterNumber(ch.optString("chapter", ""))
+            if (number.isBlank()) continue   // skip entries without a chapter number
+
+            val existing = byNumber[number]
+            if (existing == null) {
+                byNumber[number] = ch
+                continue
+            }
+
+            // Tie-break: prefer the entry with a longer title
+            val existingTitle = existing.optString("title", "").trim()
+            val newTitle = ch.optString("title", "").trim()
+            if (newTitle.length > existingTitle.length) {
+                byNumber[number] = ch
+            }
+        }
+        return byNumber.values.toList()
     }
 
     // ---------- Chapter matching ----------
